@@ -1,0 +1,7 @@
+[submodule "lib/llama-cpp-python"]
+	path = lib/llama-cpp-python
+	url = https://github.com/luffy06/llama-cpp-python
+	branch = dev
+[submodule "lib/transformers"]
+	path = lib/transformers
+	url = https://github.com/huggingface/transformers

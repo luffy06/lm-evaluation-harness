@@ -32,6 +32,7 @@ def get_result(logprobs, context_length):
 
     return continuation_logprobs, is_greedy
 
+from llama_cpp import Llama
 
 @register_model("gguf", "ggml")
 class GGUFLM(LM):
@@ -42,35 +43,30 @@ class GGUFLM(LM):
         self.logprobs = 10
         self.temperature = 0.0
         self.max_length = max_length
+        self.model = Llama(model_path=self.base_url, logits_all=True, verbose=False)
 
     def gguf_completion(
         self, context, continuation=None, stop=None, retries=3, delay=5, **kwargs
     ):
-        for _ in range(retries):
-            try:
-                prompt = context
-                request = {
-                    "prompt": prompt,
-                    "logprobs": self.logprobs,
-                    "temperature": self.temperature,
-                }
-                if continuation:
-                    prompt += continuation
-                    request.update({"prompt": prompt, "max_tokens": 1, "echo": True})
-                if stop is not None:
-                    request["stop"] = stop
-                response = requests.post(
-                    f"{self.base_url}/v1/completions", json=request
-                )
-                response.raise_for_status()
-                return response.json()
-            except RequestException as e:
-                logger.error(f"RequestException: {e}")
-                time.sleep(delay)  # wait before retrying
-        else:
-            raise Exception(f"Failed to get a valid response after {retries} retries.")
+        try:
+            prompt = context
+            request = {
+                "prompt": prompt,
+                "logprobs": self.logprobs,
+                "temperature": self.temperature,
+            }
+            if continuation:
+                prompt += continuation
+                request.update({"prompt": prompt, "max_tokens": 1, "echo": True})
+            if stop is not None:
+                request["stop"] = stop
+            response = self.model(**request)
+            return response
+        except RequestException as e:
+            logger.error(f"RequestException: {e}")
+        return response
 
-    def loglikelihood(self, requests, disable_tqdm: bool = False):
+    def loglikelihood(self, requests, disable_tqdm: bool = False, batch_size: int = 1):
         if not requests:
             return []
         res = []
