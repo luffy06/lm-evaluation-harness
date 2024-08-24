@@ -1,0 +1,6 @@
+[submodule "lib/transformers"]
+	path = lib/transformers
+	url = https://github.com/huggingface/transformers
+[submodule "lib/H2O"]
+	path = lib/H2O
+	url = https://github.com/FMInference/H2O
