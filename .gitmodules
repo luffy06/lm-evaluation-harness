@@ -4,3 +4,6 @@
 [submodule "lib/H2O"]
 	path = lib/H2O
 	url = https://github.com/FMInference/H2O
+[submodule "lib/llama-cpp-python"]
+	path = lib/llama-cpp-python
+	url = https://github.com/luffy06/llama-cpp-python
