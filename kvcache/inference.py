@@ -15,8 +15,84 @@ from transformers.cache_utils import Cache
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SimilarityCache(Cache):
-    pass
+class ANNCache(Cache):
+    def __init__(
+        self,
+        max_cache_size: int,
+        sim_threshold: int = 0.9,
+    ):
+        super().__init__()
+        self.cache: List[torch.Tensor] = []
+        self.key_centers: List[torch.Tensor] = []
+        self._max_cache_size = max_cache_size
+        self._sim_threshold = sim_threshold
+    
+    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+        if layer_idx < len(self):
+            return (self.key_cache[])
+
+    def __len__(self):
+        return len(self.key_cache)
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        scores = torch.matmul(key_states, self.key_centers.transpose(2, 3))
+        scores = nn.functional.softmax(scores, dim=-1, dtype=torch.float32)
+        has_sim_center = torch.sum(scores > self._sim_threshold)
+        if has_sim_center:
+            center_idx = torch.argmax(scores)
+        else:
+            center_idx = len(self.cache)
+
+        if len(self.cache) <= layer_idx:
+            self.cache.append(center_idx)
+        else:
+            self.cache[layer_idx] = torch.cat([self.cache[layer_idx], center_idx], dim=-2)
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        # TODO: deprecate this function in favor of `cache_position`
+        raise NotImplementedError("Make sure to implement `get_seq_length` in a subclass.")
+
+    def get_max_length(self) -> Optional[int]:
+        """Returns the maximum sequence length of the cached states, if there is any."""
+        raise NotImplementedError("Make sure to implement `get_max_length` in a subclass.")
+
+    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
+        """Given the sequence length of the new inputs, returns the usable length of the cache."""
+        # Cache without size limit -> all cache is usable
+        # Cache with size limit -> if the length cache plus the length of the new inputs is larger the maximum cache
+        #   length, we will need to evict part of the cache (and thus not all cache is usable)
+        max_length = self.get_max_length()
+        previous_seq_length = self.get_seq_length(layer_idx)
+        if max_length is not None and previous_seq_length + new_seq_length > max_length:
+            return max_length - new_seq_length
+        return previous_seq_length
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        """Reorders the cache for beam search, given the selected beam indices."""
+        for layer_idx in range(len(self.key_cache)):
+            device = self.key_cache[layer_idx].device
+            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
+            device = self.value_cache[layer_idx].device
+            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
+
+    @property
+    def seen_tokens(self):
+        logger.warning_once(
+            "The `seen_tokens` attribute is deprecated and will be removed in v4.41. Use the `cache_position` "
+            "model input instead."
+        )
+        if hasattr(self, "_seen_tokens"):
+            return self._seen_tokens
+        else:
+            return None
+
 
 def compute_similarity(a, b, threshold=0.5):
     score = torch.matmul(a, b.transpose(-1, -2))
