@@ -1,196 +1,110 @@
+import json
+import tqdm
 import torch
 import logging
 import argparse
-import matplotlib.pyplot as plt
-
-from transformers import (
-    AutoTokenizer, 
-    AutoConfig, 
-    AutoModelForCausalLM
-)
+import numpy as np
 from datasets import load_dataset
-from tqdm import tqdm
-from transformers.cache_utils import Cache
+from transformers import set_seed
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+MAX_LENGTH = int(10000)  # Hardcoded max length to avoid infinite loop
 
-class ANNCache(Cache):
-    def __init__(
-        self,
-        max_cache_size: int,
-        sim_threshold: int = 0.9,
-    ):
-        super().__init__()
-        self.cache: List[torch.Tensor] = []
-        self.key_centers: List[torch.Tensor] = []
-        self._max_cache_size = max_cache_size
-        self._sim_threshold = sim_threshold
-    
-    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
-        if layer_idx < len(self):
-            return (self.key_cache[])
-
-    def __len__(self):
-        return len(self.key_cache)
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        scores = torch.matmul(key_states, self.key_centers.transpose(2, 3))
-        scores = nn.functional.softmax(scores, dim=-1, dtype=torch.float32)
-        has_sim_center = torch.sum(scores > self._sim_threshold)
-        if has_sim_center:
-            center_idx = torch.argmax(scores)
-        else:
-            center_idx = len(self.cache)
-
-        if len(self.cache) <= layer_idx:
-            self.cache.append(center_idx)
-        else:
-            self.cache[layer_idx] = torch.cat([self.cache[layer_idx], center_idx], dim=-2)
-
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        # TODO: deprecate this function in favor of `cache_position`
-        raise NotImplementedError("Make sure to implement `get_seq_length` in a subclass.")
-
-    def get_max_length(self) -> Optional[int]:
-        """Returns the maximum sequence length of the cached states, if there is any."""
-        raise NotImplementedError("Make sure to implement `get_max_length` in a subclass.")
-
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-        """Given the sequence length of the new inputs, returns the usable length of the cache."""
-        # Cache without size limit -> all cache is usable
-        # Cache with size limit -> if the length cache plus the length of the new inputs is larger the maximum cache
-        #   length, we will need to evict part of the cache (and thus not all cache is usable)
-        max_length = self.get_max_length()
-        previous_seq_length = self.get_seq_length(layer_idx)
-        if max_length is not None and previous_seq_length + new_seq_length > max_length:
-            return max_length - new_seq_length
-        return previous_seq_length
-
-    def reorder_cache(self, beam_idx: torch.LongTensor):
-        """Reorders the cache for beam search, given the selected beam indices."""
-        for layer_idx in range(len(self.key_cache)):
-            device = self.key_cache[layer_idx].device
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
-            device = self.value_cache[layer_idx].device
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
-
-    @property
-    def seen_tokens(self):
-        logger.warning_once(
-            "The `seen_tokens` attribute is deprecated and will be removed in v4.41. Use the `cache_position` "
-            "model input instead."
-        )
-        if hasattr(self, "_seen_tokens"):
-            return self._seen_tokens
-        else:
-            return None
-
-
-def compute_similarity(a, b, threshold=0.5):
-    score = torch.matmul(a, b.transpose(-1, -2))
-    score = torch.softmax(score, dim=-1)
-    sim = score > threshold
-    return sim.sum()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="wikitext-103")
+    parser.add_argument("--data_name", type=str, default="")
+    parser.add_argument("--model_name", type=str, default="")
+    parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--model_name_or_path", type=str, default="llama-3-8b")
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--max_length", type=int, default=512)
-    parser.add_argument("--stride", type=int, default=512)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--ignore_self", action="store_true")
+    parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
+    parser.add_argument("--batch_size", type=int, default=1)
     args = parser.parse_args()
 
-    config = AutoConfig.from_pretrained(args.model_name_or_path)
-    config.use_cache = True
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
-    model.to(args.device)
+    args.device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
+    set_seed(args.seed)
 
-    num_layers = config.num_hidden_layers
-    model_name = config.model_type
-    logger.info(config)
+    config = AutoConfig.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True, cache_dir=args.cache_dir)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, cache_dir=args.cache_dir)
 
-    test = load_dataset("wikitext", args.dataset + "-raw-v1", split=args.split)
-    encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    max_length = args.max_length
-    stride = args.stride
-    data_len = encodings.input_ids.size(1)
+    data = load_dataset(args.data_name, dataset, split=args.split)
 
-    nlls = []
-    sim_keys = torch.zeros(num_layers, num_layers)
-    sim_values = torch.zeros(num_layers, num_layers)
-    prev_end_loc = 0
-    for begin_loc in tqdm(range(0, data_len, stride)):
-        end_loc = min(begin_loc + max_length, data_len)
-        trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(args.device)
-        target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100
+    print(data)
 
-        with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids, use_cache=True, output_hidden_states=True, output_attentions=True)
-            kv_caches = outputs.past_key_values
-            for layer_i, kv_cache_i in enumerate(kv_caches):
-                for layer_j, kv_cache_j in enumerate(kv_caches):
-                    batch_size, num_heads, seq_len, head_dim = kv_cache_i[0].shape
-                    sim_key = compute_similarity(kv_cache_i[0], kv_cache_j[0], threshold=args.threshold)
-                    sim_value = compute_similarity(kv_cache_i[1], kv_cache_j[1], threshold=args.threshold)
-                    sim_key = sim_key.cpu() / (num_heads * seq_len * seq_len)
-                    sim_value = sim_value.cpu() / (num_heads * seq_len * seq_len)
-                    sim_keys[layer_i, layer_j] += sim_key
-                    sim_values[layer_i, layer_j] += sim_value
+    # print(len(requests))
+    # if args.sample_num < len(requests):
+    #     print('Sample {} Examples from {} samples'.format(args.sample_num, len(requests)))
+    # requests = requests[:args.sample_num]
 
-            # loss is calculated using CrossEntropyLoss which averages over valid labels
-            # N.B. the model only calculates loss over trg_len - 1 labels, because it internally shifts the labels
-            # to the left by 1.
-            neg_log_likelihood = outputs.loss
-        
+    # results = []
+    # rouge = Rouge()
+    # rouge1_score_list = []
+    # rouge2_score_list = []
+    # rougel_score_list = []
 
-        nlls.append(neg_log_likelihood)
+    # with torch.no_grad():
+    #     for request in tqdm.tqdm(requests):
+    #         result = {'request': request, 'result': {}}
+    #         prompt = request['article']
+    #         label = request['summary_gt']
+    #         temperature = request['temperature']
+    #         stop = request['stop']
 
-        prev_end_loc = end_loc
-        if end_loc == data_len:
-            break
+    #         input_ids = tokenizer(prompt, add_special_tokens=False, return_tensors='pt').input_ids.to(model.device)
 
-    sim_keys = sim_keys / len(nlls)
-    sim_values = sim_values / len(nlls)
+    #         output_sequences = model.generate(
+    #             input_ids=input_ids,
+    #             max_length=request['max_tokens'] + len(input_ids[0]),
+    #             temperature=temperature,
+    #             top_k=args.k,
+    #             top_p=request['top_p'],
+    #             do_sample=True,
+    #             num_return_sequences=request['n'],
+    #             return_dict_in_generate=True, output_scores=True,
+    #         )
 
-    if args.ignore_self:
-        for i in range(num_layers):
-            sim_keys[i, i] = 0
-            sim_values[i, i] = 0
+    #         if args.enable_h2o_cache:
+    #             for name, m in model.named_modules():
+    #                 if isinstance(m, TAGET_MODULE['llama_h2o']):
+    #                     m._clean_cache()
 
-    ppl = torch.exp(torch.stack(nlls).mean())
-    logger.info(f"Perplexity: {ppl.item()}")
+    #         tokens = tokenizer.convert_ids_to_tokens(output_sequences['sequences'].squeeze(0))[len(input_ids[0]):]
+    #         logprobs = [logits.log_softmax(dim=-1).max().item() for logits in output_sequences['scores']]
+    #         top_logprobs = [{i: v for i, v in zip(tokens, logprobs)}]
 
-    plt.figure(figsize=(10, 10))
-    plt.subplot(1, 2, 1)
-    plt.imshow(sim_keys.cpu().numpy(), cmap="hot", interpolation="nearest")
-    plt.colorbar()
-    plt.title(f"Key Similarity of {model_name} on {args.dataset}")
-    plt.xlabel("Layer")
-    plt.ylabel("Layer")
+    #         generate_text = tokenizer.decode(output_sequences['sequences'].squeeze(0)[len(input_ids[0]):])
+    #         generate_text = generate_text[: generate_text.find(stop[0])]
 
-    plt.subplot(1, 2, 2)
-    plt.imshow(sim_values.cpu().numpy(), cmap="hot", interpolation="nearest")
-    plt.colorbar()
-    plt.title(f"Value Similarity of {model_name} on {args.dataset}")
-    plt.xlabel("Layer")
-    plt.ylabel("Layer")
-    plt.show()
+    #         scores = rouge.get_scores(generate_text, label)[0]
+    #         rouge1_score_list.append(scores['rouge-1']['f'])
+    #         rouge2_score_list.append(scores['rouge-2']['f'])
+    #         rougel_score_list.append(scores['rouge-l']['f'])
 
-    plt.savefig(f"kv-sim-{args.dataset}-{model_name}-{int(args.threshold*100)}.png")
+    #         result['result'] = {
+    #             "choices": [
+    #                 {
+    #                     "text": generate_text,
+    #                     "logprobs": {
+    #                         "tokens": tokens, 
+    #                         "token_logprobs": logprobs, 
+    #                         "top_logprobs": top_logprobs, 
+    #                         "text_offset": []
+    #                     }, 
+    #                     "finish_reason": "length"
+    #                 }
+    #             ], 
+    #             "request_time": {
+    #                 "batch_time": 0, 
+    #                 "batch_size": 1}
+    #         }
+            
+    #         results.append(result)
+    #         print('rouge-1: {:.6f}, rouge-2: {:.6f}, rouge-l: {:.6f}'.format(np.mean(rouge1_score_list), np.mean(rouge2_score_list), np.mean(rougel_score_list)))
+
+    # with open(output_path, 'w') as f:
+    #     for result in results:
+    #         f.write(json.dumps(result) + '\n')

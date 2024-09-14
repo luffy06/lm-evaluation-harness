@@ -1,6 +1,6 @@
 DEVICES=1
 PROJECT_ROOT=$(git rev-parse --show-toplevel)
-MODEL_PATH=/fsx/hyperpod-input-datasets/AROA6GBMFKRI2VWQAUGYI:Shangyu.Wu@mbzuai.ac.ae/models/llama-3-8b
+MODEL_PATH=/l/users/shangyu.wu/models/llama-3-8b
 DATASET=wikitext-103
 
 CUDA_VISIBLE_DEVICES=$DEVICES python $PROJECT_ROOT/kvcache/similarity.py \
